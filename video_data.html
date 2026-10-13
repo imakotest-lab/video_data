@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -5690,7 +5689,7 @@
       document.body.style.overflow = 'hidden';
     },
 
-    submit() {
+    async submit() {
   const choice = document.querySelector('input[name="decisionChoice"]:checked');
   if (!choice) { showToast('❌ Sélectionnez Accepter ou Rejeter avant de valider.'); return; }
   const motif = this.motifSelect.value;
@@ -5699,26 +5698,27 @@
   const commentaire = this.commentBox.value.trim();
   setPvDecision(this.pvId, { decision: choice.value, motif, commentaire });
 
-  // === Création + téléchargement du .txt (même nom que le PV) ===
+  // === Envoi direct de la décision à l'API (met à jour le PV sur le serveur) ===
   const pv = allPv.find(p => p.id === this.pvId);
   if (pv) {
-    const txtName = (pv.filename || (pv.id + '.html')).replace(/\.[^.]+$/, '') + '.txt';
-    const content =
-`#PV_DECISION
-pv_path: ${pv.full_path}
-decision: ${choice.value}
-motif: ${motif}
-commentaire: ${commentaire.replace(/\r?\n/g, ' ')}
-`;
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = txtName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    try {
+      const res = await fetch(`${API_BASE}/api/pv/decision`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pv_path: pv.full_path,
+          decision: choice.value,
+          motif,
+          commentaire
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast('⚠️ Décision enregistrée, mais PV non mis à jour : ' + (err.erreur || res.status));
+      }
+    } catch (e) {
+      showToast('⚠️ Décision enregistrée, mais serveur injoignable.');
+    }
   }
 
   showToast(choice.value === 'accepte' ? `✅ PV ${this.pvId} accepté` : `❌ PV ${this.pvId} rejeté`);
