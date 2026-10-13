@@ -2034,5 +2034,10 @@ def test():
             try: transport.close()
             except: pass
 
+# ==================== DECISIONS PV (remplace api2) ====================
+from pv_decision import register_pv_decision
+register_pv_decision(app, get_sftp_client, DOSSIER_PV_INFRACTION)
+
+
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)
