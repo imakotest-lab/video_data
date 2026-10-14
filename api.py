@@ -114,7 +114,7 @@ EXTENSIONS_VIDEO = (".mp4", ".avi", ".mov", ".mkv")
 EXTENSIONS_AUDIO = (".wav", ".mp3", ".aac", ".flac", ".ogg", ".m4a", ".wma")
 EXTENSIONS_GPS = (".json",)
 EXTENSIONS_PHOTOS = (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp")
-EXTENSIONS_PV = (".html", ".htm", ".docx", ".pdf")  # .docx = format généré par pv_generator.py ; .pdf gardé pour compat descendante
+EXTENSIONS_PV = (".html", ".htm")  # seuls les PV HTML sont listés et comptés (les anciens .docx / .pdf sont ignorés)
 
 # ==================== GESTIONNAIRE DE SCRIPTS (VERSION DISTANTE UNIQUEMENT) ====================
 
@@ -1401,6 +1401,17 @@ def list_pv():
             pv["numero_pv"] = f"{base_numero}-{suffixe}" if suffixe else base_numero
             pv["statut"] = "En attente"
             pv["format"] = pv["filename"].rsplit('.', 1)[-1].lower()  # "docx" ou "pdf"
+        
+        # Un même PV peut exister en plusieurs formats (html + docx) : on ne garde qu'une version,
+        # en priorité le HTML (seul format modifiable par la décision / le commentaire).
+        PRIORITE_FORMAT = {"html": 0, "htm": 0, "pdf": 1, "docx": 2}
+        meilleurs = {}
+        for pv in pv_files:
+            cle = pv["numero_pv"]
+            actuel = meilleurs.get(cle)
+            if actuel is None or PRIORITE_FORMAT.get(pv["format"], 9) < PRIORITE_FORMAT.get(actuel["format"], 9):
+                meilleurs[cle] = pv
+        pv_files = list(meilleurs.values())
         
         # Trier par date
         pv_files.sort(key=lambda x: x["mtime"], reverse=True)
