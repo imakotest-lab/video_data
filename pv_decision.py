@@ -66,8 +66,6 @@ def register_pv_decision(app, get_sftp_client, pv_base_dir):
 
         if not pv_path:
             return jsonify({"erreur": "pv_path manquant"}), 400
-        if not pv_path.lower().endswith((".html", ".htm")):
-            return jsonify({"erreur": "Seuls les PV HTML sont modifiables"}), 400
 
         # Sécurité : le chemin doit rester dans le dossier des PV
         pv_path = posixpath.normpath(pv_path)
@@ -77,6 +75,21 @@ def register_pv_decision(app, get_sftp_client, pv_base_dir):
         sftp = transport = None
         try:
             sftp, transport = get_sftp_client()
+
+            # Si le chemin reçu est un .docx / .pdf, on cherche le .html du même PV
+            if not pv_path.lower().endswith((".html", ".htm")):
+                base = pv_path.rsplit(".", 1)[0]
+                trouve = None
+                for ext in (".html", ".htm"):
+                    try:
+                        sftp.stat(base + ext)
+                        trouve = base + ext
+                        break
+                    except FileNotFoundError:
+                        continue
+                if not trouve:
+                    return jsonify({"erreur": "Aucune version HTML de ce PV : seuls les PV HTML sont modifiables"}), 400
+                pv_path = trouve
 
             with sftp.open(pv_path, "rb") as f:
                 original = f.read().decode("utf-8", errors="replace")
