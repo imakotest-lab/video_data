@@ -986,76 +986,99 @@ def list_audio():
             try: transport.close()
             except: pass
 
-@app.route("/api/audio/stream/<path:filepath>")
-def stream_audio(filepath):
-    """Stream un fichier audio depuis le serveur SFTP"""
-    sftp = None
-    transport = None
-    
+# ==================== STREAMING SFTP AVEC SUPPORT "Range" ====================
+RANGE_CHUNK_MAX = 8 * 1024 * 1024   # taille max servie par requête Range (8 Mo)
+
+def sftp_range_response(decoded_path, mime_type):
+    """
+    Sert un fichier SFTP en respectant les requêtes HTTP Range (206 Partial Content),
+    indispensable pour lire / avancer dans une vidéo depuis un navigateur.
+    Utilise le prefetch de paramiko pour éviter 1 aller-retour réseau par 32 Ko.
+    """
+    sftp = transport = None
     try:
-        decoded_path = urllib.parse.unquote(filepath)
-        if not decoded_path.startswith('/'):
-            decoded_path = '/' + decoded_path
-        
-        logger.info(f"Streaming audio: {decoded_path}")
-        
         sftp, transport = get_sftp_client()
-        
         try:
-            sftp.stat(decoded_path)
+            size = sftp.stat(decoded_path).st_size
         except FileNotFoundError:
+            sftp.close(); transport.close()
             return jsonify({"erreur": f"Fichier non trouvé: {decoded_path}"}), 404
-        
-        file_obj = sftp.open(decoded_path, 'rb')
-        
-        # Type MIME pour l'audio
-        mime_type = 'audio/mpeg'
-        if decoded_path.endswith('.mp3'):
-            mime_type = 'audio/mpeg'
-        elif decoded_path.endswith('.wav'):
-            mime_type = 'audio/wav'
-        elif decoded_path.endswith('.aac'):
-            mime_type = 'audio/aac'
-        elif decoded_path.endswith('.flac'):
-            mime_type = 'audio/flac'
-        elif decoded_path.endswith('.ogg'):
-            mime_type = 'audio/ogg'
-        elif decoded_path.endswith('.m4a'):
-            mime_type = 'audio/mp4'
-        elif decoded_path.endswith('.wma'):
-            mime_type = 'audio/x-ms-wma'
-        
+
+        start, end, status = 0, size - 1, 200
+        range_header = request.headers.get("Range", "")
+        m = re.match(r"bytes=(\d*)-(\d*)", range_header)
+        if m and size > 0:
+            g1, g2 = m.groups()
+            if g1 == "" and g2 != "":            # "bytes=-500" : les 500 derniers octets
+                start = max(size - int(g2), 0)
+            else:
+                start = int(g1) if g1 else 0
+                if g2:
+                    end = min(int(g2), size - 1)
+            if start >= size or start > end:
+                sftp.close(); transport.close()
+                return Response(status=416, headers={"Content-Range": f"bytes */{size}"})
+            end = min(end, start + RANGE_CHUNK_MAX - 1)   # on sert par tranches de 8 Mo
+            status = 206
+
+        length = end - start + 1
+        file_obj = sftp.open(decoded_path, "rb")
+        file_obj.seek(start)
+        try:
+            file_obj.prefetch(file_size=end + 1)
+        except Exception:
+            pass
+
         def generate():
+            remaining = length
             try:
-                while True:
-                    data = file_obj.read(8192)
+                while remaining > 0:
+                    data = file_obj.read(min(262144, remaining))
                     if not data:
                         break
+                    remaining -= len(data)
                     yield data
             finally:
-                file_obj.close()
-                sftp.close()
-                transport.close()
-        
-        return Response(
-            stream_with_context(generate()),
-            mimetype=mime_type,
-            headers={
-                'Content-Disposition': f'inline; filename="{os.path.basename(decoded_path)}"',
-                'Accept-Ranges': 'bytes',
-                'Cache-Control': 'no-cache'
-            }
-        )
-        
+                for obj in (file_obj, sftp, transport):
+                    try: obj.close()
+                    except Exception: pass
+
+        headers = {
+            "Content-Disposition": f'inline; filename="{os.path.basename(decoded_path)}"',
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(length),
+            "Cache-Control": "no-cache",
+        }
+        if status == 206:
+            headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+
+        return Response(stream_with_context(generate()), status=status,
+                        mimetype=mime_type, headers=headers)
     except Exception as e:
-        logger.error(f"Erreur streaming audio: {e}")
-        if sftp:
-            try: sftp.close()
-            except: pass
-        if transport:
-            try: transport.close()
-            except: pass
+        logger.error(f"Erreur streaming {decoded_path}: {e}")
+        for obj in (sftp, transport):
+            try:
+                if obj: obj.close()
+            except Exception:
+                pass
         return jsonify({"erreur": str(e)}), 500
+
+
+def _decode_stream_path(filepath):
+    p = urllib.parse.unquote(filepath)
+    return p if p.startswith("/") else "/" + p
+
+
+@app.route("/api/audio/stream/<path:filepath>")
+def stream_audio(filepath):
+    """Stream un fichier audio depuis le serveur SFTP (avec Range)"""
+    decoded_path = _decode_stream_path(filepath)
+    logger.info(f"Streaming audio: {decoded_path}")
+    ext = os.path.splitext(decoded_path)[1].lower()
+    mime = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".aac": "audio/aac",
+            ".flac": "audio/flac", ".ogg": "audio/ogg", ".m4a": "audio/mp4",
+            ".wma": "audio/x-ms-wma"}.get(ext, "audio/mpeg")
+    return sftp_range_response(decoded_path, mime)
 
 # ==================== ENDPOINTS GPS ====================
 
@@ -1607,65 +1630,13 @@ def stats():
 
 @app.route("/api/video/stream/<path:filepath>")
 def stream_video(filepath):
-    """Stream une vidéo depuis le serveur SFTP"""
-    sftp = None
-    transport = None
-    
-    try:
-        decoded_path = urllib.parse.unquote(filepath)
-        if not decoded_path.startswith('/'):
-            decoded_path = '/' + decoded_path
-        
-        logger.info(f"Streaming vidéo: {decoded_path}")
-        
-        sftp, transport = get_sftp_client()
-        
-        try:
-            sftp.stat(decoded_path)
-        except FileNotFoundError:
-            return jsonify({"erreur": f"Fichier non trouvé: {decoded_path}"}), 404
-        
-        file_obj = sftp.open(decoded_path, 'rb')
-        
-        mime_type = 'video/mp4'
-        if decoded_path.endswith('.avi'):
-            mime_type = 'video/x-msvideo'
-        elif decoded_path.endswith('.mov'):
-            mime_type = 'video/quicktime'
-        elif decoded_path.endswith('.mkv'):
-            mime_type = 'video/x-matroska'
-        
-        def generate():
-            try:
-                while True:
-                    data = file_obj.read(8192)
-                    if not data:
-                        break
-                    yield data
-            finally:
-                file_obj.close()
-                sftp.close()
-                transport.close()
-        
-        return Response(
-            stream_with_context(generate()),
-            mimetype=mime_type,
-            headers={
-                'Content-Disposition': f'inline; filename="{os.path.basename(decoded_path)}"',
-                'Accept-Ranges': 'bytes',
-                'Cache-Control': 'no-cache'
-            }
-        )
-        
-    except Exception as e:
-        logger.error(f"Erreur streaming vidéo: {e}")
-        if sftp:
-            try: sftp.close()
-            except: pass
-        if transport:
-            try: transport.close()
-            except: pass
-        return jsonify({"erreur": str(e)}), 500
+    """Stream une vidéo depuis le serveur SFTP (avec Range)"""
+    decoded_path = _decode_stream_path(filepath)
+    logger.info(f"Streaming vidéo: {decoded_path}")
+    ext = os.path.splitext(decoded_path)[1].lower()
+    mime = {".mp4": "video/mp4", ".avi": "video/x-msvideo",
+            ".mov": "video/quicktime", ".mkv": "video/x-matroska"}.get(ext, "video/mp4")
+    return sftp_range_response(decoded_path, mime)
 
 @app.route("/api/video/check/<path:filepath>")
 def check_video(filepath):
