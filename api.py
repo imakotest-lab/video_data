@@ -5,6 +5,7 @@ Structure des dossiers identifiée :
 - General/videos/         : Videos normales (TID-*.mp4)
 - General/audio/          : Audio normaux (TID-*.wav)
 - General/gps/            : GPS normaux (TID-*.json)
+- General/photos/         : Photos capture (TID-*.jpg)
 
 - Events/videos/          : Infractions vidéo simples (TID-*-tag-*.mp4)
 - Events/videos/IR/       : Infractions vidéo Routières (TID-*-tag-*IR.mp4)
@@ -98,6 +99,7 @@ DOSSIER_GPS_INFRACTION_AN = "/home/cs-collector/Events/gps/AN"
 DOSSIER_GPS_INFRACTION_OC = "/home/cs-collector/Events/gps/OC"
 
 # --- PHOTOS ---
+DOSSIER_PHOTOS_NORMAL = "/home/cs-collector/General/photos"   # photos capture
 DOSSIER_PHOTOS_INFRACTION = "/home/cs-collector/Events/infraction/photos"
 DOSSIER_PHOTOS_INFRACTION_IR = "/home/cs-collector/Events/infraction/photos/IR"
 DOSSIER_PHOTOS_INFRACTION_AN = "/home/cs-collector/Events/infraction/photos/AN"
@@ -1250,7 +1252,9 @@ def list_photos():
         
         sftp, transport = get_sftp_client()
         photos = []
-        
+
+        # 0. Photos capture (General/photos)
+        photos.extend(list_files_generic(sftp, DOSSIER_PHOTOS_NORMAL, EXTENSIONS_PHOTOS, "normal"))
         # 1. Photos infractions simples (Events/infraction/photos racine)
         photos.extend(list_files_generic(
             sftp, DOSSIER_PHOTOS_INFRACTION, EXTENSIONS_PHOTOS, "simple"
@@ -1552,9 +1556,13 @@ def stats():
         nb_gps_oc, _, _ = compter_dossier(sftp, DOSSIER_GPS_INFRACTION_OC, EXTENSIONS_GPS)
         
         # --- Statistiques photos ---
-        nb_photos_total, taille_photos = compter_avec_sous_dossiers(
+        
+        nb_photos_normal, taille_photos_normal, _ = compter_dossier(sftp, DOSSIER_PHOTOS_NORMAL, EXTENSIONS_PHOTOS)
+        nb_photos_infraction, taille_photos_infraction = compter_avec_sous_dossiers(
             sftp, DOSSIER_PHOTOS_INFRACTION, EXTENSIONS_PHOTOS
         )
+        nb_photos_total = nb_photos_normal + nb_photos_infraction
+        taille_photos = taille_photos_normal + taille_photos_infraction
         nb_photos_simple, _, _ = compter_dossier(sftp, DOSSIER_PHOTOS_INFRACTION, EXTENSIONS_PHOTOS)
         nb_photos_ir, _, _ = compter_dossier(sftp, DOSSIER_PHOTOS_INFRACTION_IR, EXTENSIONS_PHOTOS)
         nb_photos_an, _, _ = compter_dossier(sftp, DOSSIER_PHOTOS_INFRACTION_AN, EXTENSIONS_PHOTOS)
@@ -1609,6 +1617,7 @@ def stats():
             
             # Photos
             "total_photos": nb_photos_total,
+            "photos_normal": nb_photos_normal,
             "photos_simple": nb_photos_simple,
             "photos_ir": nb_photos_ir,
             "photos_an": nb_photos_an,
@@ -1958,6 +1967,7 @@ def test():
         
         result = {
             "connexion": "OK",
+            "general_photos": {"path": DOSSIER_PHOTOS_NORMAL, "exists": False, "count": 0},
             "general_videos": {"path": DOSSIER_VIDEOS_NORMAL, "exists": False, "count": 0},
             "general_audio": {"path": DOSSIER_AUDIO_NORMAL, "exists": False, "count": 0},
             "general_gps": {"path": DOSSIER_GPS_NORMAL, "exists": False, "count": 0},
