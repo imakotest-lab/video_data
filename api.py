@@ -1405,6 +1405,11 @@ def list_pv():
             pv["numero_pv"] = f"{base_numero}-{suffixe}" if suffixe else base_numero
             pv["statut"] = "En attente"
             pv["format"] = pv["filename"].rsplit('.', 1)[-1].lower()  # "docx" ou "pdf"
+            d = read_decision(sftp, pv["full_path"]) or {}
+            pv["decision"] = d.get("decision", "attente")
+            pv["motif"] = d.get("motif", "")
+            pv["commentaire"] = d.get("commentaire", "")
+            pv["cloture"] = bool(d.get("cloture", False))
         
         # Un même PV peut exister en plusieurs formats (html + docx) : on ne garde qu'une version,
         # en priorité le HTML (seul format modifiable par la décision / le commentaire).
@@ -2027,7 +2032,7 @@ def test():
             except: pass
 
 # ==================== DECISIONS PV (remplace api2) ====================
-from pv_decision import register_pv_decision
+from pv_decision import register_pv_decision, read_decision
 register_pv_decision(app, get_sftp_client, DOSSIER_PV_INFRACTION)
 
 
