@@ -1,18 +1,16 @@
 """
-Décisions de PV -- version API (remplace api2_pv_decision.py)
+Décisions de PV -- version API
 -------------------------------------------------------------
-Route : POST /api/pv/decision
-Corps JSON : {"pv_path": "...", "decision": "...", "motif": "...", "commentaire": "..."}
-
-Le dashboard envoie directement la décision au serveur Flask (Render).
-Le PV HTML est lu en SFTP, le commentaire est ajouté / remplacé / supprimé
-sous la ligne "Point :", puis le PV est réécrit sur le serveur.
+POST /api/pv/decision : enregistre la décision (fichier .decision.json)
+                        et le commentaire (dans le PV HTML)
+POST /api/pv/cloture  : clôture un PV accepté
 """
-
+import json
 import re
 import html
 import posixpath
 import logging
+from datetime import datetime
 from flask import jsonify, request
 
 log = logging.getLogger("pv_decision")
@@ -55,17 +53,72 @@ def insert_after_point(html_text, text):
     return cleaned + block
 
 
+def read_decision(sftp, pv_path):
+    try:
+        with sftp.open(pv_path + ".decision.json", "rb") as f:
+            return json.loads(f.read().decode("utf-8"))
+    except (IOError, ValueError):
+        return None
+
+
+def write_file(sftp, path, content_bytes):
+    tmp = path + ".tmp"
+    with sftp.open(tmp, "wb") as f:
+        f.write(content_bytes)
+    try:
+        sftp.posix_rename(tmp, path)
+    except Exception:
+        sftp.remove(path)
+        sftp.rename(tmp, path)
+
+
+def _close(*objs):
+    for obj in objs:
+        try:
+            if obj:
+                obj.close()
+        except Exception:
+            pass
+
+
 def register_pv_decision(app, get_sftp_client, pv_base_dir):
-    """Enregistre la route sur l'app Flask existante."""
+    """Enregistre les routes sur l'app Flask existante."""
+
+    @app.route("/api/pv/cloture", methods=["POST"])
+    def pv_cloture():
+        data = request.get_json(silent=True) or {}
+        pv_path = posixpath.normpath((data.get("pv_path") or "").strip())
+        if not pv_path.startswith(pv_base_dir.rstrip("/") + "/"):
+            return jsonify({"erreur": "Chemin non autorisé"}), 403
+        sftp = transport = None
+        try:
+            sftp, transport = get_sftp_client()
+            d = read_decision(sftp, pv_path)
+            if not d or d.get("decision") != "accepte":
+                return jsonify({"erreur": "Seul un PV accepté peut être clôturé"}), 400
+            d["cloture"] = True
+            d["date_cloture"] = datetime.now().isoformat(timespec="seconds")
+            write_file(sftp, pv_path + ".decision.json",
+                       json.dumps(d, ensure_ascii=False).encode("utf-8"))
+            return jsonify({"statut": "ok"}), 200
+        except Exception as e:
+            log.error(f"Erreur clôture PV : {e}")
+            return jsonify({"erreur": str(e)}), 500
+        finally:
+            _close(sftp, transport)
 
     @app.route("/api/pv/decision", methods=["POST"])
     def pv_decision():
         data = request.get_json(silent=True) or {}
         pv_path = (data.get("pv_path") or "").strip()
         commentaire = (data.get("commentaire") or "").strip()
+        decision = (data.get("decision") or "").strip()
+        motif = (data.get("motif") or "").strip()
 
         if not pv_path:
             return jsonify({"erreur": "pv_path manquant"}), 400
+        if decision not in ("accepte", "rejete"):
+            return jsonify({"erreur": "decision invalide"}), 400
 
         # Sécurité : le chemin doit rester dans le dossier des PV
         pv_path = posixpath.normpath(pv_path)
@@ -94,18 +147,29 @@ def register_pv_decision(app, get_sftp_client, pv_base_dir):
             with sftp.open(pv_path, "rb") as f:
                 original = f.read().decode("utf-8", errors="replace")
 
-            updated = insert_after_point(original, commentaire)
-            if updated == original:
-                return jsonify({"statut": "inchange"}), 200
+            # Refus si le PV est déjà clôturé
+            existant = read_decision(sftp, pv_path)
+            if existant and existant.get("cloture"):
+                return jsonify({"erreur": "PV clôturé : modification interdite"}), 409
 
-            tmp_path = pv_path + ".tmp"
-            with sftp.open(tmp_path, "wb") as f:
-                f.write(updated.encode("utf-8"))
-            try:
-                sftp.posix_rename(tmp_path, pv_path)
-            except Exception:
-                sftp.remove(pv_path)
-                sftp.rename(tmp_path, pv_path)
+            # Sauvegarde de l'ancienne version
+            write_file(sftp, pv_path + ".bak", original.encode("utf-8"))
+
+            # Commentaire dans le HTML
+            updated = insert_after_point(original, commentaire)
+            if updated != original:
+                write_file(sftp, pv_path, updated.encode("utf-8"))
+
+            # Décision côté serveur
+            info = {
+                "decision": decision,
+                "motif": motif,
+                "commentaire": commentaire,
+                "cloture": False,
+                "date": datetime.now().isoformat(timespec="seconds"),
+            }
+            write_file(sftp, pv_path + ".decision.json",
+                       json.dumps(info, ensure_ascii=False).encode("utf-8"))
 
             log.info(f"PV mis à jour : {pv_path}")
             return jsonify({"statut": "ok"}), 200
@@ -116,9 +180,4 @@ def register_pv_decision(app, get_sftp_client, pv_base_dir):
             log.error(f"Erreur mise à jour PV : {e}")
             return jsonify({"erreur": str(e)}), 500
         finally:
-            for obj in (sftp, transport):
-                try:
-                    if obj:
-                        obj.close()
-                except Exception:
-                    pass
+            _close(sftp, transport)
